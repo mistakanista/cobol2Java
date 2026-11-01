@@ -1,8 +1,8 @@
 package com.banking.service;
 
 import com.banking.domain.Account;
-import com.banking.dto.AccountSearchRequest;
-import com.banking.dto.AccountSearchResponse;
+import com.banking.dto.AccountLookupRequest;
+import com.banking.dto.AccountLookupResponse;
 import com.banking.exception.AccountNotFoundException;
 import com.banking.repository.AccountRepository;
 import org.junit.jupiter.api.BeforeEach;
@@ -15,24 +15,24 @@ import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.math.BigDecimal;
 import java.time.LocalDate;
-import java.time.Month;
-import java.time.format.DateTimeFormatter;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.*;
 
 /**
- * Unit tests for AccountService.
+ * Unit tests for {@link AccountService}.
  *
- * Legacy mapping note: The original COBOL MAIN-PROCEDURE performed an exact
- * string comparison (WS-Input-FirstName = WS-FirstName AND WS-Input-LastName =
- * WS-LastName) after UNSTRING on SPACE. These tests verify that the service
- * preserves exact-match semantics and correctly translates the Name-Match flag
- * logic (set to 'Y' on hit, stay 'N' on miss) into exception-based flow.
+ * The legacy COBOL program performed:
+ *  1. UNSTRING WS-UserInput BY SPACE -> first/last name tokens
+ *  2. Sequential file scan with exact, case-sensitive IF comparison
+ *  3. DISPLAY balance or not-found message
+ *
+ * These tests verify that the equivalent Java service logic handles all
+ * relevant scenarios correctly without depending on the file system or a
+ * real database (Mockito is used to stub AccountRepository).
  */
 @ExtendWith(MockitoExtension.class)
 class AccountServiceTest {
@@ -47,189 +47,198 @@ class AccountServiceTest {
 
     @BeforeEach
     void setUp() {
-        // Represents a single comma-delimited record from the legacy AccountFile:
-        // Hans,Mueller,1985-03-12,1234.56
+        // Represents a CSV record: John,Doe,1990-01-15,1234.56
         sampleAccount = new Account();
-        sampleAccount.setId(1L);
-        sampleAccount.setFirstName("Hans");
-        sampleAccount.setLastName("Mueller");
-        sampleAccount.setBirthDate(LocalDate.of(1985, Month.MARCH, 12).format(DateTimeFormatter.ofPattern("yyyy-MM-dd")));
+        sampleAccount.setId(Long.valueOf(1L));
+        sampleAccount.setFirstName("John");
+        sampleAccount.setLastName("Doe");
+        sampleAccount.setBirthDate(LocalDate.of(1990, 1, 15));
         sampleAccount.setBalance(new BigDecimal("1234.56"));
     }
 
-    // -------------------------------------------------------------------------
-    // Happy path – account found
-    // -------------------------------------------------------------------------
+    // -----------------------------------------------------------------------
+    // Happy-path: matching account found
+    // -----------------------------------------------------------------------
 
     @Test
-    @DisplayName("findAccount: returns response with balance when exact name match found")
-    void findAccount_exactMatch_returnsAccountResponse() {
+    @DisplayName("lookupAccount: returns balance when first and last name match exactly (case-sensitive)")
+    void lookupAccount_matchFound_returnsBalance() {
         // Arrange
-        AccountSearchRequest request = new AccountSearchRequest("Hans", "Mueller");
-        when(accountRepository.findByFirstNameAndLastName("Hans", "Mueller"))
+        AccountLookupRequest request = new AccountLookupRequest();
+        request.setFullName("John Doe");
+
+        when(accountRepository.findFirstByFirstNameAndLastName("John", "Doe"))
                 .thenReturn(Optional.of(sampleAccount));
 
         // Act
-        AccountSearchResponse response = accountService.findAccount(request);
+        AccountLookupResponse response = accountService.lookupAccount(request);
 
-        // Assert – mirrors DISPLAY "Der Kontostand von " WS-FirstName SPACE WS-LastName
+        // Assert
         assertThat(response.isFound()).isTrue();
-        assertThat(response.getFirstName()).isEqualTo("Hans");
-        assertThat(response.getLastName()).isEqualTo("Mueller");
+        assertThat(response.getFirstName()).isEqualTo("John");
+        assertThat(response.getLastName()).isEqualTo("Doe");
         assertThat(response.getBalance()).isEqualByComparingTo(new BigDecimal("1234.56"));
-        assertThat(response.getMessage()).contains("Hans").contains("Mueller");
+        assertThat(response.getMessage()).isEqualTo("Der Kontostand von John Doe lautet: 1234.56");
 
-        verify(accountRepository, times(1)).findByFirstNameAndLastName("Hans", "Mueller");
+        verify(accountRepository).findFirstByFirstNameAndLastName("John", "Doe");
     }
 
     @Test
-    @DisplayName("findAccount: response message contains customer full name on match")
-    void findAccount_matchFound_messageContainsFullName() {
-        AccountSearchRequest request = new AccountSearchRequest("Hans", "Mueller");
-        when(accountRepository.findByFirstNameAndLastName("Hans", "Mueller"))
+    @DisplayName("lookupAccount: handles extra whitespace tokens — only first two tokens used")
+    void lookupAccount_extraWhitespace_usesFirstTwoTokens() {
+        // Arrange – user typed two spaces between names; split should still work
+        AccountLookupRequest request = new AccountLookupRequest();
+        request.setFullName("John  Doe");
+
+        when(accountRepository.findFirstByFirstNameAndLastName("John", "Doe"))
                 .thenReturn(Optional.of(sampleAccount));
 
-        AccountSearchResponse response = accountService.findAccount(request);
+        // Act
+        AccountLookupResponse response = accountService.lookupAccount(request);
 
-        // The legacy program displayed both name parts and the balance in one line.
-        assertThat(response.getMessage())
-                .contains("Hans")
-                .contains("Mueller")
-                .contains("1234.56");
+        // Assert
+        assertThat(response.isFound()).isTrue();
+        assertThat(response.getBalance()).isEqualByComparingTo(new BigDecimal("1234.56"));
     }
 
-    // -------------------------------------------------------------------------
-    // Not-found path – mirrors Name-Match = 'N' branch
-    // -------------------------------------------------------------------------
+    // -----------------------------------------------------------------------
+    // Not-found: no matching account
+    // -----------------------------------------------------------------------
 
     @Test
-    @DisplayName("findAccount: throws AccountNotFoundException when no record matches")
-    void findAccount_noMatch_throwsAccountNotFoundException() {
-        // Arrange – simulates exhausting all AccountFile records without a hit
-        AccountSearchRequest request = new AccountSearchRequest("Unknown", "Person");
-        when(accountRepository.findByFirstNameAndLastName("Unknown", "Person"))
+    @DisplayName("lookupAccount: throws AccountNotFoundException when no record matches")
+    void lookupAccount_noMatch_throwsAccountNotFoundException() {
+        // Arrange
+        AccountLookupRequest request = new AccountLookupRequest();
+        request.setFullName("Jane Smith");
+
+        when(accountRepository.findFirstByFirstNameAndLastName("Jane", "Smith"))
                 .thenReturn(Optional.empty());
 
-        // Act & Assert – mirrors DISPLAY "Kein Konto für " WS-UserInput " gefunden."
-        assertThatThrownBy(() -> accountService.findAccount(request))
+        // Act & Assert
+        // The COBOL program displayed "Kein Konto für <input> gefunden."
+        // The modern equivalent throws a domain exception that the
+        // GlobalExceptionHandler converts to a 404 response.
+        assertThatThrownBy(() -> accountService.lookupAccount(request))
                 .isInstanceOf(AccountNotFoundException.class)
-                .hasMessageContaining("Unknown")
-                .hasMessageContaining("Person");
+                .hasMessageContaining("Jane Smith");
+
+        verify(accountRepository).findFirstByFirstNameAndLastName("Jane", "Smith");
     }
 
+    // -----------------------------------------------------------------------
+    // Case-sensitivity: exact match required (legacy behaviour preserved)
+    // -----------------------------------------------------------------------
+
     @Test
-    @DisplayName("findAccount: exception message includes both first and last name from request")
-    void findAccount_noMatch_exceptionMessageContainsInputNames() {
-        AccountSearchRequest request = new AccountSearchRequest("Anna", "Schmidt");
-        when(accountRepository.findByFirstNameAndLastName("Anna", "Schmidt"))
+    @DisplayName("lookupAccount: case-sensitive — 'john doe' does NOT match 'John Doe'")
+    void lookupAccount_wrongCase_throwsAccountNotFoundException() {
+        // Arrange
+        // The legacy COBOL IF comparison applied no INSPECT/UPPER transformation;
+        // 'john doe' must NOT match 'John Doe'.
+        AccountLookupRequest request = new AccountLookupRequest();
+        request.setFullName("john doe");
+
+        when(accountRepository.findFirstByFirstNameAndLastName("john", "doe"))
                 .thenReturn(Optional.empty());
 
-        assertThatThrownBy(() -> accountService.findAccount(request))
-                .isInstanceOf(AccountNotFoundException.class)
-                .hasMessageContaining("Anna Schmidt");
-    }
-
-    // -------------------------------------------------------------------------
-    // Input parsing edge cases – mirror UNSTRING on SPACE from PARSE-USER-INPUT
-    // -------------------------------------------------------------------------
-
-    @Test
-    @DisplayName("parseUserInput: splits space-delimited string into firstName and lastName")
-    void parseUserInput_validInput_returnsParsedRequest() {
-        // The COBOL UNSTRING WS-UserInput DELIMITED BY SPACE INTO
-        //   WS-Input-FirstName WS-Input-LastName
-        // is replicated in the service helper method.
-        AccountSearchRequest result = accountService.parseUserInput("Hans Mueller");
-
-        assertThat(result.firstName()).isEqualTo("Hans");
-        assertThat(result.lastName()).isEqualTo("Mueller");
-    }
-
-    @Test
-    @DisplayName("parseUserInput: trims leading and trailing spaces before splitting")
-    void parseUserInput_extraWhitespace_trimmedCorrectly() {
-        AccountSearchRequest result = accountService.parseUserInput("  Hans   Mueller  ");
-
-        assertThat(result.firstName()).isEqualTo("Hans");
-        assertThat(result.lastName()).isEqualTo("Mueller");
-    }
-
-    @Test
-    @DisplayName("parseUserInput: single token results in IllegalArgumentException for missing last name")
-    void parseUserInput_singleToken_lastNameIsEmpty() {
-        IllegalArgumentException exception = assertThrows(
-                IllegalArgumentException.class,
-                () -> accountService.parseUserInput("Hans")
-        );
-
-        assertThat(exception.getMessage())
-                .isEqualTo("User input must contain both a first name and a last name separated by a space.");
-    }
-
-    @Test
-    @DisplayName("parseUserInput: empty string throws IllegalArgumentException")
-    void parseUserInput_emptyString_throwsIllegalArgumentException() {
-        assertThrows(IllegalArgumentException.class,
-                () -> accountService.parseUserInput(""));
-    }
-
-    @Test
-    @DisplayName("parseUserInput: input with multiple spaces uses only first two tokens and combines the others")
-    void parseUserInput_multipleTokens_onlyFirstTwoUsed() {
-        // COBOL UNSTRING fills targets left-to-right; any additional tokens are discarded.
-        AccountSearchRequest result = accountService.parseUserInput("Hans Otto Mueller");
-
-        assertThat(result.firstName()).isEqualTo("Hans");
-        assertThat(result.lastName()).isEqualTo("Otto Mueller");
-    }
-
-    // -------------------------------------------------------------------------
-    // Exact-match case sensitivity – COBOL comparison is case-sensitive
-    // -------------------------------------------------------------------------
-
-    @Test
-    @DisplayName("findAccount: case mismatch does not produce a match (legacy exact comparison)")
-    void findAccount_caseMismatch_throwsAccountNotFoundException() {
-        // The original COBOL IF comparison is case-sensitive; 'hans' != 'Hans'.
-        AccountSearchRequest request = new AccountSearchRequest("hans", "mueller");
-        when(accountRepository.findByFirstNameAndLastName("hans", "mueller"))
-                .thenReturn(Optional.empty());
-
-        assertThatThrownBy(() -> accountService.findAccount(request))
+        // Act & Assert
+        assertThatThrownBy(() -> accountService.lookupAccount(request))
                 .isInstanceOf(AccountNotFoundException.class);
 
-        verify(accountRepository).findByFirstNameAndLastName("hans", "mueller");
+        // Verify repository was queried with the un-normalised tokens
+        verify(accountRepository).findFirstByFirstNameAndLastName("john", "doe");
+        verify(accountRepository, never()).findFirstByFirstNameAndLastName("John", "Doe");
     }
 
-    // -------------------------------------------------------------------------
-    // Repository interaction verification
-    // -------------------------------------------------------------------------
+    // -----------------------------------------------------------------------
+    // Input validation: missing last name (no space in input)
+    // -----------------------------------------------------------------------
 
     @Test
-    @DisplayName("findAccount: repository is called exactly once per search")
-    void findAccount_repositoryCalledOnce() {
-        AccountSearchRequest request = new AccountSearchRequest("Hans", "Mueller");
-        when(accountRepository.findByFirstNameAndLastName(anyString(), anyString()))
+    @DisplayName("lookupAccount: throws IllegalArgumentException when fullName contains no space")
+    void lookupAccount_noSpaceInInput_throwsIllegalArgumentException() {
+        // Arrange
+        // The legacy COBOL UNSTRING would leave WS-Input-LastName empty, causing
+        // no match. The modern service validates eagerly and fails fast.
+        AccountLookupRequest request = new AccountLookupRequest();
+        request.setFullName("JohnDoe");
+
+        // Act & Assert
+        assertThatThrownBy(() -> accountService.lookupAccount(request))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("space");
+
+        // Repository must not be queried when input is structurally invalid
+        verify(accountRepository, never()).findFirstByFirstNameAndLastName(anyString(), anyString());
+    }
+
+    @Test
+    @DisplayName("lookupAccount: throws IllegalArgumentException when fullName is blank")
+    void lookupAccount_blankInput_throwsIllegalArgumentException() {
+        // Arrange
+        AccountLookupRequest request = new AccountLookupRequest();
+        request.setFullName("   ");
+
+        // Act & Assert
+        assertThatThrownBy(() -> accountService.lookupAccount(request))
+                .isInstanceOf(IllegalArgumentException.class);
+
+        verify(accountRepository, never()).findFirstByFirstNameAndLastName(anyString(), anyString());
+    }
+
+    @Test
+    @DisplayName("lookupAccount: throws IllegalArgumentException when fullName is null")
+    void lookupAccount_nullInput_throwsIllegalArgumentException() {
+        // Arrange
+        AccountLookupRequest request = new AccountLookupRequest();
+        request.setFullName(null);
+
+        // Act & Assert
+        assertThatThrownBy(() -> accountService.lookupAccount(request))
+                .isInstanceOf(IllegalArgumentException.class);
+
+        verify(accountRepository, never()).findFirstByFirstNameAndLastName(anyString(), anyString());
+    }
+
+    // -----------------------------------------------------------------------
+    // Edge case: only first name supplied (trailing space)
+    // -----------------------------------------------------------------------
+
+    @Test
+    @DisplayName("lookupAccount: throws IllegalArgumentException when last name token is empty after split")
+    void lookupAccount_missingLastNameToken_throwsIllegalArgumentException() {
+        // Arrange – user typed 'John ' (trailing space, no last name)
+        AccountLookupRequest request = new AccountLookupRequest();
+        request.setFullName("John ");
+
+        // Act & Assert
+        assertThatThrownBy(() -> accountService.lookupAccount(request))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("last name");
+
+        verify(accountRepository, never()).findFirstByFirstNameAndLastName(anyString(), anyString());
+    }
+
+    // -----------------------------------------------------------------------
+    // Verify repository interaction count (first match stops the scan)
+    // -----------------------------------------------------------------------
+
+    @Test
+    @DisplayName("lookupAccount: repository is queried exactly once per request")
+    void lookupAccount_repositoryCalledExactlyOnce() {
+        // In legacy COBOL the loop exited early after the first match
+        // (MOVE HIGH-VALUES TO Line-End). The repository lookup naturally
+        // mirrors this: one findFirstByFirstNameAndLastName call per request.
+        AccountLookupRequest request = new AccountLookupRequest();
+        request.setFullName("John Doe");
+
+        when(accountRepository.findFirstByFirstNameAndLastName("John", "Doe"))
                 .thenReturn(Optional.of(sampleAccount));
 
-        accountService.findAccount(request);
+        accountService.lookupAccount(request);
 
-        verify(accountRepository, times(1)).findByFirstNameAndLastName("Hans", "Mueller");
+        verify(accountRepository, times(1)).findFirstByFirstNameAndLastName("John", "Doe");
         verifyNoMoreInteractions(accountRepository);
-    }
-
-    @Test
-    @DisplayName("findAccount: balance is returned as BigDecimal preserving full precision")
-    void findAccount_balancePrecision_preservedAsBigDecimal() {
-        // Legacy WS-Balance was PIC X(20); migrated to BigDecimal to ensure
-        // monetary precision is maintained rather than relying on floating-point.
-        sampleAccount.setBalance(new BigDecimal("99999999.99"));
-        AccountSearchRequest request = new AccountSearchRequest("Hans", "Mueller");
-        when(accountRepository.findByFirstNameAndLastName("Hans", "Mueller"))
-                .thenReturn(Optional.of(sampleAccount));
-
-        AccountSearchResponse response = accountService.findAccount(request);
-
-        assertThat(response.getBalance()).isEqualByComparingTo(new BigDecimal("99999999.99"));
     }
 }

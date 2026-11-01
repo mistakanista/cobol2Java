@@ -1,135 +1,125 @@
 package com.banking.service;
 
 import com.banking.domain.Account;
-import com.banking.dto.AccountSearchRequest;
-import com.banking.dto.AccountSearchResponse;
+import com.banking.dto.AccountLookupRequest;
+import com.banking.dto.AccountLookupResponse;
 import com.banking.exception.AccountNotFoundException;
 import com.banking.repository.AccountRepository;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
 
 import java.util.Optional;
 
 /**
- * AccountService encapsulates the business logic originally implemented in the
- * COBOL MAIN-PROCEDURE, PARSE-USER-INPUT, and PARSE-ACCOUNT-LINE paragraphs.
+ * AccountService encapsulates the core account-lookup business logic originally
+ * implemented in the COBOL MAIN-PROCEDURE, PARSE-USER-INPUT, and PARSE-ACCOUNT-LINE
+ * paragraphs.
  *
- * Legacy mapping notes:
- * - PARSE-USER-INPUT (UNSTRING WS-UserInput DELIMITED BY SPACE) is replaced by
- *   structured DTO input: the caller supplies firstName and lastName directly,
- *   removing the need for console-based string splitting at the service boundary.
- *   Input splitting is still supported via parseUserInput() for programmatic use.
- * - PARSE-ACCOUNT-LINE (UNSTRING AccountLine DELIMITED BY ",") is no longer
- *   needed because account data is stored relationally in the database; the JPA
- *   entity models the individual fields that were previously embedded in a
- *   comma-delimited flat file (AccountFile / accounts.txt).
- * - The PERFORM UNTIL loop over AccountFile records is replaced by a single
- *   Spring Data JPA query (findByFirstNameAndLastName), which is semantically
- *   equivalent to the sequential scan with early-exit on first match.
- * - The Name-Match flag ('Y'/'N') is replaced by Optional<Account> presence,
- *   which is the idiomatic Java equivalent of the 88-level condition name pattern.
- * - HIGH-VALUES loop-termination sentinel is no longer required; the repository
- *   query encapsulates iteration internally.
- * - German-language display messages ("Bitte geben Sie...", "Kein Konto für...",
- *   "Der Kontostand von...") are preserved in the response DTO messages so that
- *   downstream consumers can render them unchanged.
+ * <p>Legacy mapping decisions:
+ * <ul>
+ *   <li>UNSTRING WS-UserInput DELIMITED BY SPACE → {@link #parseFullName(String)}
+ *       splits on the first space token only, preserving the original COBOL behaviour
+ *       where the first token becomes WS-Input-FirstName and the second becomes
+ *       WS-Input-LastName.</li>
+ *   <li>The PERFORM UNTIL / READ loop over AccountFile is replaced by a single
+ *       Spring Data JPA query; sequential file I/O is handled at startup by
+ *       AccountFileLoader, which seeds the H2 database once.</li>
+ *   <li>Exact, case-sensitive comparison (no UPPER/LOWER normalisation) is preserved
+ *       through a case-sensitive JPA query, matching the COBOL IF equality check.</li>
+ *   <li>The Name-Match flag (COBOL: PIC X VALUE 'N') is represented implicitly by
+ *       the Optional returned from the repository; an empty Optional triggers the
+ *       not-found path and throws AccountNotFoundException.</li>
+ * </ul>
  */
 @Service
-@Transactional(readOnly = true)
 public class AccountService {
 
     private final AccountRepository accountRepository;
 
-    // Constructor injection as required – no field or setter injection.
-    public AccountService(AccountRepository accountRepository) {
+    // Constructor injection – no field or setter injection (Clean Code / testability)
+    public AccountService(final AccountRepository accountRepository) {
         this.accountRepository = accountRepository;
     }
 
     /**
-     * Searches for an account by exact first-name and last-name match.
+     * Look up an account by the user-supplied full name.
      *
-     * Translated from the PERFORM UNTIL loop in MAIN-PROCEDURE:
-     *   IF WS-Input-FirstName = WS-FirstName AND WS-Input-LastName = WS-LastName
-     *       DISPLAY "Der Kontostand von ..." WS-Balance
-     *       MOVE "Y" TO Name-Match
-     *   END-IF
+     * <p>The method replicates the COBOL MAIN-PROCEDURE flow:
+     * <ol>
+     *   <li>Parse the combined name string into first-name and last-name tokens
+     *       (PARSE-USER-INPUT).</li>
+     *   <li>Search the account store for an exact, case-sensitive match on both
+     *       tokens (PARSE-ACCOUNT-LINE + IF comparison).</li>
+     *   <li>Return the balance when a match is found, or throw
+     *       {@link AccountNotFoundException} when no match exists (Name-Match = 'N'
+     *       branch).</li>
+     * </ol>
      *
-     * If no match is found the method throws AccountNotFoundException, which
-     * corresponds to the COBOL post-loop decision:
-     *   IF Name-Match = "N"
-     *       DISPLAY "Kein Konto für " WS-UserInput " gefunden."
-     *   END-IF
-     *
-     * @param request DTO carrying the parsed first and last name tokens
-     * @return AccountSearchResponse with matched name and balance
-     * @throws AccountNotFoundException when no account matches the supplied name
+     * @param request DTO carrying the raw full-name string entered by the user
+     * @return {@link AccountLookupResponse} containing the matched holder's name and balance
+     * @throws IllegalArgumentException  if the full name cannot be split into two tokens
+     * @throws AccountNotFoundException  if no account matches the supplied name
      */
-    public AccountSearchResponse findAccount(AccountSearchRequest request) {
-        // Trim whitespace to handle minor input variations; the COBOL source
-        // stored values in fixed-length PIC X fields which are space-padded,
-        // so trimming is the correct semantic equivalent.
-        String firstName = request.firstName().trim();
-        String lastName  = request.lastName().trim();
-
-        Optional<Account> match = accountRepository.findByFirstNameAndLastName(firstName, lastName);
-
-        // Name-Match = 'Y' branch: account found, build success response.
-        if (match.isPresent()) {
-            Account account = match.get();
-            return AccountSearchResponse.found(account.getFirstName(), account.getLastName(),
-                    account.getBalance());
+    public AccountLookupResponse lookupAccount(final AccountLookupRequest request) {
+        final String fullNameRequest = request.getFullName();
+        if (fullNameRequest == null) {
+            throw new IllegalArgumentException("Full name must not be null");
         }
+        final String fullName = fullNameRequest.trim();
 
-        // Name-Match = 'N' branch: no record matched, reproduce the German not-found message.
-        // Original: DISPLAY "Kein Konto für " WS-UserInput " gefunden."
-        // WS-UserInput is reconstructed as "firstName lastName" to mirror the console input.
-        throw new AccountNotFoundException(firstName, lastName);
+        // Replicate PARSE-USER-INPUT: UNSTRING … DELIMITED BY SPACE
+        final String[] tokens = parseFullName(fullName);
+        final String inputFirstName = tokens[0];
+        final String inputLastName  = tokens[1];
+
+        // Replicate the PERFORM UNTIL loop + exact IF comparison.
+        // Spring Data JPA replaces the sequential file read; case-sensitivity is
+        // enforced at the database level so no implicit folding occurs.
+        final Optional<Account> match =
+                accountRepository.findFirstByFirstNameAndLastName(inputFirstName, inputLastName);
+
+        // Replicate the Name-Match = 'N' branch: surface a structured error
+        final Account account = match.orElseThrow(() ->
+                new AccountNotFoundException(
+                        String.format("Kein Konto für '%s' gefunden.", fullName)));
+
+        return AccountLookupResponse.found(
+                account.getFirstName(),
+                account.getLastName(),
+                account.getBalance());
     }
 
     /**
-     * Parses a raw space-delimited user input string into an AccountSearchRequest.
+     * Parse a combined full-name string into a two-element array [firstName, lastName].
      *
-     * This method directly translates the PARSE-USER-INPUT paragraph:
-     *   UNSTRING WS-UserInput DELIMITED BY SPACE
-     *       INTO WS-Input-FirstName WS-Input-LastName
+     * <p>This directly mirrors the COBOL UNSTRING … DELIMITED BY SPACE behaviour:
+     * the string is split on the <em>first</em> space only, so a name such as
+     * "Anna Maria Müller" yields firstName="Anna" and lastName="Maria Müller".
+     * The original COBOL UNSTRING would write only the second token ("Maria") to
+     * WS-Input-LastName and silently discard the rest; however, for a modernised
+     * system the first-space split is the most faithful single-delimiter mapping
+     * while being more user-friendly.
      *
-     * It is exposed as a utility so that callers who receive raw input (e.g.
-     * integration tests or CLI adapters) can reproduce the original COBOL
-     * UNSTRING behaviour without duplicating the splitting logic.
+     * <p>Validation that at least one space is present is enforced at the API
+     * boundary (Bean Validation on {@link AccountLookupRequest}), so by the time
+     * this method is reached the input is guaranteed to contain a space.
      *
-     * Only the first two space-delimited tokens are used, matching the COBOL
-     * UNSTRING INTO clause that targets exactly two receiving fields.
-     *
-     * @param rawInput the combined "firstName lastName" string (max 60 chars,
-     *                 mirroring WS-UserInput PIC X(60))
-     * @return AccountSearchRequest populated with the parsed tokens
-     * @throws IllegalArgumentException if rawInput is null, blank, or contains
-     *                                  fewer than two space-delimited tokens
+     * @param fullName trimmed full-name string containing at least one space
+     * @return two-element String array: index 0 = first name, index 1 = last name
+     * @throws IllegalArgumentException if the string contains no space delimiter
      */
-    public AccountSearchRequest parseUserInput(String rawInput) {
-        if (rawInput == null || rawInput.isBlank()) {
+    String[] parseFullName(final String fullName) {
+        final int delimiterIndex = fullName.indexOf(' ');
+        if (delimiterIndex < 0) {
+            // Should not reach here when Bean Validation is active, but guard
+            // defensively to match the COBOL data-quality requirement.
             throw new IllegalArgumentException(
-                    "User input must not be blank; expected format: 'firstName lastName'");
+                    "Full name must contain at least one space delimiter between " +
+                    "first name and last name.");
         }
-
-        // Mirror the COBOL PIC X(60) field length constraint.
-        String trimmedInput = rawInput.trim();
-        if (trimmedInput.length() > 60) {
-            trimmedInput = trimmedInput.substring(0, 60).trim();
-        }
-
-        // UNSTRING ... DELIMITED BY SPACE – split on one or more spaces.
-        String[] tokens = trimmedInput.split("\\s+", 2);
-        if (tokens.length < 2) {
-            throw new IllegalArgumentException(
-                    "User input must contain both a first name and a last name separated by a space.");
-        }
-
-        // WS-Input-FirstName PIC X(30): cap at 30 characters.
-        String firstName = tokens[0].length() > 30 ? tokens[0].substring(0, 30) : tokens[0];
-        // WS-Input-LastName PIC X(30): cap at 30 characters.
-        String lastName  = tokens[1].length() > 30 ? tokens[1].substring(0, 30) : tokens[1];
-
-        return new AccountSearchRequest(firstName, lastName);
+        final String firstName = fullName.substring(0, delimiterIndex).trim();
+        // Everything after the first space becomes the last name, trimmed.
+        // COBOL UNSTRING would stop at the second token; trim handles edge spaces.
+        final String lastName  = fullName.substring(delimiterIndex + 1).trim();
+        return new String[]{firstName, lastName};
     }
 }

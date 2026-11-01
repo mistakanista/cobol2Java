@@ -1,137 +1,84 @@
 package com.banking.domain;
 
-import jakarta.persistence.Column;
-import jakarta.persistence.Entity;
-import jakarta.persistence.GeneratedValue;
-import jakarta.persistence.GenerationType;
-import jakarta.persistence.Id;
-import jakarta.persistence.Table;
+import jakarta.persistence.*;
+import lombok.AllArgsConstructor;
+import lombok.Builder;
+import lombok.Getter;
+import lombok.NoArgsConstructor;
+import lombok.Setter;
 
 import java.math.BigDecimal;
+import java.time.LocalDate;
 
 /**
- * JPA entity representing a single account record.
+ * JPA entity representing a single customer account record.
  *
  * Legacy mapping notes:
- * - The original COBOL program read comma-delimited flat-file records (AccountLine, PIC X(100))
- *   containing four fields: first name, last name, birth date, and balance.
- * - WS-FirstName / WS-LastName (PIC X(30)) map to firstName / lastName String fields.
- * - WS-BirthDate (PIC X(10)) maps to a String field; kept as String to preserve the
- *   original alphanumeric format without imposing a date type contract at this stage.
- * - WS-Balance (PIC X(20)) held a textual balance value; mapped to BigDecimal to enforce
- *   proper monetary arithmetic and eliminate implicit string-to-number conversion risks
- *   that were hidden in the COBOL DISPLAY statement.
- * - Name-Match ('Y'/'N') was a working-storage flag; it is NOT persisted here because it
- *   represents transient search state, now encapsulated in the service layer.
+ * - Derived from the COBOL FILE SECTION record 'AccountLine' (PIC X(100)) and
+ *   the four WORKING-STORAGE fields populated by PARSE-ACCOUNT-LINE:
+ *     WS-FirstName  PIC X(30)  -> firstName  (String)
+ *     WS-LastName   PIC X(30)  -> lastName   (String)
+ *     WS-BirthDate  PIC X(10)  -> birthDate  (LocalDate, ISO-8601 format assumed)
+ *     WS-Balance    PIC X(20)  -> balance    (BigDecimal)
+ *
+ * - WS-Balance was an alphanumeric COBOL field; money amounts are always
+ *   represented as BigDecimal in the modernised system to avoid floating-point
+ *   rounding errors (see Clean Code / DDD money-value best practice).
+ *
+ * - birthDate is stored as LocalDate rather than a raw String so that the
+ *   domain model is semantically correct, even though the legacy system only
+ *   ever displayed it (no arithmetic was performed on it).
+ *
+ * - Exact, case-sensitive name matching is preserved: no normalisation
+ *   (toUpperCase / toLowerCase) is applied, mirroring the legacy IF comparison
+ *   with no INSPECT/UPPER conversion in the COBOL source.
  */
 @Entity
 @Table(name = "accounts")
+@Getter
+@Setter
+@NoArgsConstructor
+@AllArgsConstructor
+@Builder
 public class Account {
 
+    /**
+     * Surrogate primary key – the legacy flat file had no concept of a
+     * primary key; we introduce one for JPA identity management.
+     */
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
     /**
-     * Maps to COBOL WS-FirstName (PIC X(30)).
-     * Trimmed on read in the service layer, mirroring COBOL's space-padded field behaviour.
+     * Customer first name (max 30 characters, matching COBOL PIC X(30)).
+     * Must not be blank; used in exact case-sensitive lookup.
      */
     @Column(name = "first_name", nullable = false, length = 30)
     private String firstName;
 
     /**
-     * Maps to COBOL WS-LastName (PIC X(30)).
+     * Customer last name (max 30 characters, matching COBOL PIC X(30)).
+     * Must not be blank; used in exact case-sensitive lookup.
      */
     @Column(name = "last_name", nullable = false, length = 30)
     private String lastName;
 
     /**
-     * Maps to COBOL WS-BirthDate (PIC X(10)).
-     * Retained as String to avoid imposing a date format at the persistence boundary;
-     * the original COBOL field was purely alphanumeric.
+     * Customer birth date parsed from the third comma-delimited field in
+     * accounts.txt (COBOL PIC X(10), ISO-8601 format: YYYY-MM-DD assumed).
+     * Nullable to tolerate records where the birth-date field is absent or
+     * malformed in the source file.
      */
-    @Column(name = "birth_date", length = 10)
-    private String birthDate;
+    @Column(name = "birth_date")
+    private LocalDate birthDate;
 
     /**
-     * Maps to COBOL WS-Balance (PIC X(20)).
-     * Promoted from alphanumeric to BigDecimal to ensure correct monetary representation,
-     * avoiding the implicit string comparison the COBOL DISPLAY used.
+     * Account balance parsed from the fourth comma-delimited field.
+     * BigDecimal is mandatory for monetary values to ensure precision.
+     * Stored with up to 20 significant digits and 2 decimal places,
+     * reflecting the COBOL PIC X(20) source width.
      */
-    @Column(name = "balance", nullable = false, precision = 19, scale = 2)
+    @Column(name = "balance", nullable = false, precision = 20, scale = 2)
     private BigDecimal balance;
-
-    // -------------------------------------------------------------------------
-    // Constructors
-    // -------------------------------------------------------------------------
-
-    /** Required by JPA. */
-    public Account() {
-    }
-
-    public Account(String firstName, String lastName, String birthDate, BigDecimal balance) {
-        this.firstName = firstName;
-        this.lastName = lastName;
-        this.birthDate = birthDate;
-        this.balance = balance;
-    }
-
-    // -------------------------------------------------------------------------
-    // Getters – no setters exposed publicly; state changes go through the service
-    // -------------------------------------------------------------------------
-
-    public Long getId() {
-        return id;
-    }
-
-    public String getFirstName() {
-        return firstName;
-    }
-
-    public void setId(Long id) {
-        this.id = id;
-    }
-
-    public void setFirstName(String firstName) {
-        this.firstName = firstName;
-    }
-
-    public void setLastName(String lastName) {
-        this.lastName = lastName;
-    }
-
-    public void setBirthDate(String birthDate) {
-        this.birthDate = birthDate;
-    }
-
-    public void setBalance(BigDecimal balance) {
-        this.balance = balance;
-    }
-
-    public String getLastName() {
-        return lastName;
-    }
-
-    public String getBirthDate() {
-        return birthDate;
-    }
-
-    public BigDecimal getBalance() {
-        return balance;
-    }
-
-    // -------------------------------------------------------------------------
-    // Object overrides
-    // -------------------------------------------------------------------------
-
-    @Override
-    public String toString() {
-        return "Account{"
-                + "id=" + id
-                + ", firstName='" + firstName + '\''
-                + ", lastName='" + lastName + '\''
-                + ", birthDate='" + birthDate + '\''
-                + ", balance=" + balance
-                + '}';
-    }
 }

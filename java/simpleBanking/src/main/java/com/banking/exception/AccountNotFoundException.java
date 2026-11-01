@@ -1,46 +1,32 @@
 package com.banking.exception;
 
+import lombok.Getter;
+
 /**
- * Custom exception thrown when no account record matches the provided first and last name.
+ * Custom runtime exception thrown by AccountService when no account record
+ * matches the supplied first name and last name combination.
  *
- * Legacy mapping: In the original COBOL MAIN-PROCEDURE, after the sequential file search loop
- * completed, the program checked whether Name-Match still equalled 'N' and displayed a
- * German-language not-found message before executing STOP RUN. In the modern architecture this
- * exceptional path is represented as a typed exception so that the GlobalExceptionHandler can
- * produce a consistent, structured HTTP 404 response without polluting service logic with
- * response-building concerns.
+ * Replaces the legacy COBOL behaviour where the Name-Match flag remained 'N'
+ * after the full sequential file scan and a not-found DISPLAY was emitted.
+ * Throwing a dedicated exception here keeps the service return type clean
+ * (always a valid AccountLookupResponse on success) and delegates error
+ * response formatting to the GlobalExceptionHandler.
  */
+@Getter
 public class AccountNotFoundException extends RuntimeException {
 
-    private final String searchedFirstName;
-    private final String searchedLastName;
-
-    public AccountNotFoundException(String searchedFirstName, String searchedLastName) {
-        super(String.format(
-                "Kein Konto für %s %s gefunden.",
-                searchedFirstName,
-                searchedLastName));
-        this.searchedFirstName = searchedFirstName;
-        this.searchedLastName = searchedLastName;
-    }
-
     /**
-     * Returns the first name that was used in the failed search.
-     * Preserves the WS-Input-FirstName value from the original COBOL working-storage.
+     * -- GETTER --
+     *  Returns the original full-name string entered by the user, mirroring
+     *  the legacy DISPLAY that included WS-UserInput in the not-found message.
      *
-     * @return searched first name
+     * @return the raw user-supplied name query
      */
-    public String getSearchedFirstName() {
-        return searchedFirstName;
+    private final String queriedFullName;
+
+    public AccountNotFoundException(String queriedFullName) {
+        super("No account found for: " + queriedFullName);
+        this.queriedFullName = queriedFullName;
     }
 
-    /**
-     * Returns the last name that was used in the failed search.
-     * Preserves the WS-Input-LastName value from the original COBOL working-storage.
-     *
-     * @return searched last name
-     */
-    public String getSearchedLastName() {
-        return searchedLastName;
-    }
 }

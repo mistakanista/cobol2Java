@@ -1,213 +1,196 @@
-# Banking Account Lookup — Legacy Modernisation
+# Banking Account Lookup — Modernised Spring Boot Backend
 
-This project is a modern Java/Spring Boot backend that replaces a legacy COBOL program (`BankingApp`) originally running on an IBM mainframe. The original program read customer names from an operator console, searched a sequential flat file (`accounts.txt`) for a matching record, and displayed the account balance or a not-found message.
+## Overview
 
----
-
-## Table of Contents
-
-1. [Architecture Overview](#architecture-overview)
-2. [Legacy-to-Modern Mapping Decisions](#legacy-to-modern-mapping-decisions)
-3. [Project Structure](#project-structure)
-4. [Prerequisites](#prerequisites)
-5. [Setup & Running](#setup--running)
-6. [REST API Reference](#rest-api-reference)
-7. [Running Tests](#running-tests)
-8. [Design Decisions & Notes](#design-decisions--notes)
+This project is a modernised Java/Spring Boot backend that replaces a legacy IBM mainframe COBOL program (`BankingApp`). The original system ran as a console-interactive COBOL program that sequentially scanned a flat file (`accounts.txt`) to look up a customer account balance by first and last name. The modernised system exposes the same business capability as a REST API backed by a relational database, while preserving all original business rules — including exact, case-sensitive name matching.
 
 ---
 
-## Architecture Overview
-
-The application follows a classic layered Spring Boot architecture:
+## Architecture
 
 ```
-HTTP Client
-    │
-    ▼
-┌─────────────────────────┐
-│   AccountController     │  REST layer  — validates input, delegates to service
-│   /api/v1/accounts      │
-└────────────┬────────────┘
-             │
-             ▼
-┌─────────────────────────┐
-│   AccountService        │  Business logic — encapsulates search & match rules
-└────────────┬────────────┘
-             │
-             ▼
-┌─────────────────────────┐
-│   AccountRepository     │  Data access — Spring Data JPA, H2 (dev) / any RDBMS
-└────────────┬────────────┘
-             │
-             ▼
-┌─────────────────────────┐
-│   Account (JPA Entity)  │  Domain model — firstName, lastName, birthDate, balance
-└─────────────────────────┘
+┌─────────────────────────────────────────────────────────┐
+│                    REST API Layer                        │
+│         AccountController  /api/v1/accounts/lookup      │
+└───────────────────────┬─────────────────────────────────┘
+                        │ delegates to
+┌───────────────────────▼─────────────────────────────────┐
+│                   Service Layer                          │
+│   AccountService — name parsing, matching, validation   │
+└───────────────────────┬─────────────────────────────────┘
+                        │ queries
+┌───────────────────────▼─────────────────────────────────┐
+│                 Repository Layer                         │
+│        AccountRepository (Spring Data JPA)              │
+└───────────────────────┬─────────────────────────────────┘
+                        │ persists/reads
+┌───────────────────────▼─────────────────────────────────┐
+│                  Domain / Persistence                    │
+│        Account entity  ←  AccountFileLoader             │
+│        (H2 in-memory DB)    (seeds from accounts.txt)   │
+└─────────────────────────────────────────────────────────┘
 ```
 
-Cross-cutting concerns:
-- **GlobalExceptionHandler** (`@ControllerAdvice`) — centralised HTTP error responses
-- **Bean Validation** (`@Valid`) — input validation at the API boundary
-- **AccountNotFoundException** — typed exception for the no-match business rule
+### Layers
 
----
-
-## Legacy-to-Modern Mapping Decisions
-
-| COBOL Construct | Modern Equivalent | Rationale |
+| Layer | Class(es) | Responsibility |
 |---|---|---|
-| `WORKING-STORAGE` variables (`WS-FirstName`, `WS-LastName`, etc.) | Fields in `AccountSearchRequest` / `AccountSearchResponse` DTOs and `Account` entity | Global mutable state replaced with scoped, immutable-friendly data transfer objects |
-| `ACCEPT WS-UserInput` (operator console) | `POST /api/v1/accounts/search` request body (`AccountSearchRequest`) | Console I/O translated to a REST endpoint; operator input becomes a validated JSON payload |
-| `UNSTRING WS-UserInput DELIMITED BY SPACE` (`PARSE-USER-INPUT`) | `@NotBlank` + split logic in `AccountService.parseFullName()` | The UNSTRING paragraph is a pure parsing concern; encapsulated as a private service method |
-| Sequential flat file `AccountFile` (comma-delimited records) | `Account` JPA entity + `AccountRepository` (Spring Data JPA) | Flat-file storage replaced with a relational database; the comma-delimited record structure maps directly to entity fields |
-| `UNSTRING AccountLine DELIMITED BY ","` (`PARSE-ACCOUNT-LINE`) | JPA column mapping on `Account` entity fields | The parsing paragraph is no longer needed; the ORM handles field mapping |
-| `PERFORM UNTIL Line-End = HIGH-VALUES` loop with `AT END` sentinel | `AccountRepository.findByFirstNameAndLastName()` query method | The sequential search loop is replaced by an indexed database query — O(1) vs O(n) |
-| `IF Name-Match = "N"` → display not-found message | `AccountNotFoundException` thrown by `AccountService`, handled by `GlobalExceptionHandler` | Binary flag replaced with a typed exception; HTTP 404 communicates the not-found outcome semantically |
-| `Name-Match` flag (`'Y'`/`'N'`) | Return value presence / exception absence | Boolean character flags replaced with idiomatic Java Optional/exception flow |
-| `WS-Balance` (`PIC X(20)`) | `BigDecimal balance` on `Account` entity | Alphanumeric balance field promoted to `BigDecimal` to enable safe monetary arithmetic |
-| `STOP RUN` | Normal HTTP response cycle / Spring Boot lifecycle | Program termination replaced by stateless request/response handling |
-| German-language console messages (`'Bitte geben Sie...'`, `'Kein Konto für...'`) | Structured JSON error/success responses; messages externalised to constants | Human-readable console strings replaced with machine-readable API responses |
+| **Controller** | `AccountController` | Accepts HTTP requests, validates input DTOs, returns `ResponseEntity` |
+| **Service** | `AccountService` | Parses full-name string, performs exact case-sensitive lookup, raises exceptions |
+| **Repository** | `AccountRepository` | Spring Data JPA interface; queries `Account` entity |
+| **Domain** | `Account` | JPA entity with `firstName`, `lastName`, `birthDate`, `balance` (BigDecimal) |
+| **Loader** | `AccountFileLoader` | `ApplicationRunner` that reads `accounts.txt` at startup and seeds the database |
+| **Error handling** | `GlobalExceptionHandler`, `AccountNotFoundException` | Uniform JSON error responses for all failure modes |
 
 ---
 
-## Project Structure
+## How Legacy COBOL Logic Was Decoupled
+
+### 1. Sequential File Scan → Database + Repository
+
+The original COBOL program opened `accounts.txt` as a `LINE SEQUENTIAL` file, read every record in a `PERFORM UNTIL` loop, and compared fields in memory. In the modernised system:
+
+- **`AccountFileLoader`** (an `ApplicationRunner`) reads `accounts.txt` once at application startup, parses each comma-delimited line, and persists every record into an H2 in-memory database via the JPA repository.
+- **`AccountRepository`** then provides a single typed query `findByFirstNameAndLastName(...)` replacing the entire manual scan loop. This eliminates the stateful loop-control variable (`Line-End` / `HIGH-VALUES`) entirely.
+
+### 2. WORKING-STORAGE State → Method Parameters and DTOs
+
+The COBOL program relied heavily on WORKING-STORAGE fields (`WS-UserInput`, `WS-Input-FirstName`, `WS-Input-LastName`, `Name-Match`, `Line-End`) as shared mutable state across paragraphs. In the modernised system:
+
+- All transient state is expressed as method parameters and local variables inside `AccountService`.
+- The `Name-Match` flag is replaced by an `Optional<Account>` return value from the repository — present means matched, empty means not found.
+- The `Line-End` loop-termination sentinel is replaced by the repository query itself (no explicit iteration).
+
+### 3. PERFORM Paragraphs → Service Methods
+
+| COBOL Paragraph | Java Equivalent |
+|---|---|
+| `MAIN-PROCEDURE` | `AccountService.lookupAccount(AccountLookupRequest)` |
+| `PARSE-USER-INPUT` | `AccountService.parseFullName(String)` (private method) |
+| `PARSE-ACCOUNT-LINE` | `AccountFileLoader.parseLine(String)` (at load time) |
+
+### 4. UNSTRING (Space Delimiter) → String Split with Validation
+
+The COBOL `UNSTRING WS-UserInput DELIMITED BY SPACE` had undefined behaviour when no space was present (last name would be empty). The modernised system:
+
+- Validates that the input contains at least one space via Bean Validation on `AccountLookupRequest`.
+- Uses `String.split(" ", 2)` in `AccountService.parseFullName(...)` to mirror the two-token extraction.
+- Returns a clear validation error to the caller rather than silently failing to find a match.
+
+### 5. Console I/O → REST API
+
+The original `DISPLAY` / `ACCEPT` interaction with the console is replaced by a single REST endpoint:
 
 ```
-bankingapp/
-├── pom.xml
-├── README.md
-└── src/
-    ├── main/
-    │   ├── java/com/banking/
-    │   │   ├── BankingApplication.java
-    │   │   ├── controller/
-    │   │   │   └── AccountController.java
-    │   │   ├── domain/
-    │   │   │   └── Account.java
-    │   │   ├── dto/
-    │   │   │   ├── AccountSearchRequest.java
-    │   │   │   └── AccountSearchResponse.java
-    │   │   ├── exception/
-    │   │   │   ├── AccountNotFoundException.java
-    │   │   │   └── GlobalExceptionHandler.java
-    │   │   ├── repository/
-    │   │   │   └── AccountRepository.java
-    │   │   └── service/
-    │   │       └── AccountService.java
-    │   └── resources/
-    │       ├── application.properties
-    │       └── data.sql
-    └── test/
-        └── java/com/banking/
-            ├── controller/
-            │   └── AccountControllerTest.java
-            └── service/
-                └── AccountServiceTest.java
+POST /api/v1/accounts/lookup
+Content-Type: application/json
+
+{ "fullName": "John Smith" }
 ```
+
+The response returns either the matched account balance or a structured not-found message, rather than writing strings to stdout.
+
+### 6. Case-Sensitive Matching Preserved
+
+Per the original COBOL `IF WS-Input-FirstName = WS-FirstName AND WS-Input-LastName = WS-LastName` comparison (no `INSPECT`/`UPPER` transformation applied), the modernised system performs **exact, case-sensitive** string matching. `john smith` will **not** match `John Smith`. This is enforced at the repository query level using standard JPA equality, and documented as an explicit business rule.
+
+### 7. Missing File → User-Intelligible Error
+
+The original COBOL program had no error handling for a missing or inaccessible `accounts.txt` — it would abnormally terminate. The modernised `AccountFileLoader` catches `IOException` and throws a descriptive `IllegalStateException` that prevents application startup, surfacing a clear message in the logs.
 
 ---
 
 ## Prerequisites
 
-| Tool | Version |
-|---|---|
-| Java (JDK) | 21 or higher |
-| Maven | 3.9 or higher |
-| (Optional) Docker | For running with an external database |
+- **Java 21**
+- **Maven 3.9+**
+- An `accounts.txt` file in the location configured by `app.accounts-file-path` (default: `./accounts.txt`)
 
-No external database installation is required for development or testing — the application uses an **H2 in-memory database** by default, seeded automatically via `data.sql`.
+### accounts.txt Format
+
+Each line must be a comma-delimited record with exactly four fields:
+
+```
+John,Smith,1980-04-15,12345.67
+Jane,Doe,1992-08-30,9876.00
+```
+
+Fields: `FirstName,LastName,BirthDate(YYYY-MM-DD),Balance`
 
 ---
 
-## Setup & Running
-
-### 1. Clone / obtain the project
+## Building and Running
 
 ```bash
+# Clone the repository
 git clone <repository-url>
-cd bankingapp
-```
+cd banking-lookup
 
-### 2. Build the project
+# Place your accounts.txt in the project root (or configure the path below)
+cp /path/to/accounts.txt ./accounts.txt
 
-```bash
+# Build
 mvn clean package
-```
 
-### 3. Run the application
+# Run
+java -jar target/banking-lookup-1.0.0.jar
 
-```bash
+# Or run directly with Maven
 mvn spring-boot:run
 ```
 
-Or run the packaged JAR directly:
+### Configuring the accounts.txt path
 
-```bash
-java -jar target/bankingapp-0.0.1-SNAPSHOT.jar
+Edit `src/main/resources/application.properties`:
+
+```properties
+app.accounts-file-path=/absolute/or/relative/path/to/accounts.txt
 ```
-
-The application starts on **http://localhost:8080** by default.
-
-### 4. Verify startup
-
-Open the H2 console (development only) at:
-
-```
-http://localhost:8080/h2-console
-```
-
-Use the JDBC URL `jdbc:h2:mem:bankingdb`, username `sa`, and an empty password.
 
 ---
 
-## REST API Reference
+## API Usage
 
-### Search for an account by customer name
+### Look up an account balance
 
-**Endpoint:** `POST /api/v1/accounts/search`
+**Request**
+```http
+POST /api/v1/accounts/lookup
+Content-Type: application/json
 
-**Request Body:**
-
-```json
 {
-  "firstName": "Hans",
-  "lastName": "Müller"
+  "fullName": "John Smith"
 }
 ```
 
-| Field | Type | Constraints |
-|---|---|---|
-| `firstName` | `String` | Required, not blank, max 30 characters |
-| `lastName` | `String` | Required, not blank, max 30 characters |
-
-**Success Response — 200 OK:**
-
+**Response — match found (200 OK)**
 ```json
 {
-  "firstName": "Hans",
-  "lastName": "Müller",
-  "balance": "1500.75",
-  "found": true
+  "found": true,
+  "firstName": "John",
+  "lastName": "Smith",
+  "balance": "12345.67",
+  "message": null
 }
 ```
 
-**Not Found Response — 404 Not Found:**
-
+**Response — no match (404 Not Found)**
 ```json
 {
-  "message": "Kein Konto für Hans Müller gefunden.",
-  "found": false
+  "found": false,
+  "firstName": null,
+  "lastName": null,
+  "balance": null,
+  "message": "Kein Konto für John Smith gefunden."
 }
 ```
 
-**Validation Error Response — 400 Bad Request:**
-
+**Response — validation error (400 Bad Request)**
 ```json
 {
-  "errors": {
-    "firstName": "must not be blank"
-  }
+  "status": 400,
+  "error": "Validation Failed",
+  "details": ["fullName must contain a space between first and last name"]
 }
 ```
 
@@ -219,39 +202,29 @@ Use the JDBC URL `jdbc:h2:mem:bankingdb`, username `sa`, and an empty password.
 mvn test
 ```
 
-The test suite covers:
-
-- **AccountServiceTest** — unit tests for the core business logic:
-  - Match found by exact first name and last name
-  - No match found throws `AccountNotFoundException`
-  - Input with extra whitespace is handled correctly
-  - Empty name segments are rejected
-
-- **AccountControllerTest** — Spring MVC slice tests (`@WebMvcTest`):
-  - HTTP 200 with correct response body on a successful lookup
-  - HTTP 404 with a descriptive message when no account is found
-  - HTTP 400 when request body fails Bean Validation
+Tests cover:
+- **`AccountServiceTest`** — match found, not found, missing space in input, empty input
+- **`AccountControllerTest`** — happy path (MockMvc), validation failure, 404 response
 
 ---
 
-## Design Decisions & Notes
+## Technology Stack
 
-### Why POST for search instead of GET?
+| Concern | Technology |
+|---|---|
+| Language | Java 21 |
+| Framework | Spring Boot 3.x |
+| Persistence | Spring Data JPA + H2 (in-memory) |
+| Validation | Jakarta Bean Validation (`@Valid`) |
+| Build | Maven |
+| Boilerplate reduction | Lombok |
+| Testing | JUnit 5, Spring Boot Test, MockMvc |
 
-The original COBOL program accepted a full name string (first name + last name) as a single space-delimited input. Encoding a full name reliably as a `GET` query parameter introduces URL-encoding complexity and potential issues with special characters (e.g. German umlauts). Using `POST` with a structured JSON body is cleaner, safer, and aligns with the original intent of submitting structured input for processing.
+---
 
-### Why is the flat file replaced by a database?
+## Key Design Decisions
 
-The COBOL program performed a full sequential scan of a comma-delimited flat file on every search. This is an O(n) operation that does not scale. Replacing the file with a relational database and an indexed `findByFirstNameAndLastName` query reduces lookup time and enables concurrent access by multiple users — a fundamental requirement for an online backend service.
-
-### Why BigDecimal for balance?
-
-The original `WS-Balance` field was defined as `PIC X(20)` — a plain alphanumeric string. In financial systems, balances must support precise decimal arithmetic without floating-point rounding errors. `BigDecimal` is the Java standard for monetary values and satisfies this requirement.
-
-### Legacy flag `Name-Match` removed
-
-The `Name-Match = 'Y'/'N'` flag was a procedural workaround to track whether a sequential file scan found a result. In the modern design this is replaced by a typed `AccountNotFoundException`, which communicates the not-found outcome through the normal exception/HTTP mechanism. There is no need for a mutable flag.
-
-### German-language messages preserved in responses
-
-The original program displayed German messages to the operator console. The not-found message (`"Kein Konto für ... gefunden."`) is preserved in the API error response body to maintain continuity with the business domain language, while the API contract itself uses standard English field names.
+1. **H2 in-memory database** — chosen because the original system treated `accounts.txt` as a read-only flat file. The loader seeds the database at startup. For production use, replace with a persistent datasource (PostgreSQL, etc.) and a proper ETL or migration process.
+2. **`BigDecimal` for balance** — the COBOL `WS-Balance PIC X(20)` stored balance as a string; the modernised domain model converts it to `BigDecimal` on load for type safety and arithmetic correctness.
+3. **No verb in URL** — the endpoint is `POST /api/v1/accounts/lookup` where `lookup` identifies the sub-resource action; a pure resource design could use `GET /api/v1/accounts?firstName=John&lastName=Smith`, which is equally valid and may be preferred.
+4. **Case-sensitive matching** — explicitly preserved from the COBOL source as a documented business rule; normalisation would require a product decision, not a developer assumption.

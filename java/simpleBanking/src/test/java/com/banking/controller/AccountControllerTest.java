@@ -1,11 +1,9 @@
 package com.banking.controller;
 
-import com.banking.domain.Account;
-import com.banking.dto.AccountSearchRequest;
-import com.banking.dto.AccountSearchResponse;
+import com.banking.dto.AccountLookupRequest;
+import com.banking.dto.AccountLookupResponse;
 import com.banking.exception.AccountNotFoundException;
 import com.banking.exception.GlobalExceptionHandler;
-import com.banking.repository.AccountRepository;
 import com.banking.service.AccountService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.DisplayName;
@@ -21,18 +19,25 @@ import java.math.BigDecimal;
 import java.util.Optional;
 
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 
 /**
- * Spring MVC slice tests for {@link AccountController}.
+ * MockMvc slice tests for AccountController.
  *
- * Uses @WebMvcTest to load only the web layer, isolating the controller from the
- * service and repository layers. The AccountService is replaced by a Mockito mock
- * so that each test controls exactly what the service returns, mirroring the
- * legacy program's two terminal states: match-found and not-found.
+ * Uses @WebMvcTest to load only the web layer; AccountService is mocked via
+ * @MockBean so these tests verify HTTP contract (status codes, JSON structure,
+ * validation enforcement) without touching the database or file system.
+ *
+ * Legacy traceability:
+ *   - Happy-path test mirrors the COBOL branch where Name-Match = "Y" and
+ *     the balance is DISPLAYed.
+ *   - Not-found test mirrors the COBOL branch where Name-Match = "N" and the
+ *     not-found message is DISPLAYed.
+ *   - Validation tests enforce the modernised requirement that the input must
+ *     contain at least one space (first-name / last-name separator), replacing
+ *     the silent UNSTRING behaviour that left WS-Input-LastName empty.
  */
 @WebMvcTest(AccountController.class)
 @Import(GlobalExceptionHandler.class)
@@ -44,159 +49,166 @@ class AccountControllerTest {
     @Autowired
     private ObjectMapper objectMapper;
 
-    // AccountService is mocked to keep tests pure web-layer tests
     @MockBean
     private AccountService accountService;
 
-    @MockBean
-    private AccountRepository accountRepository;
-
-    // ---------------------------------------------------------------------------
+    // ------------------------------------------------------------------
     // Happy-path: account found
-    // ---------------------------------------------------------------------------
+    // ------------------------------------------------------------------
 
     @Test
-    @DisplayName("POST /api/v1/accounts/search returns 200 with balance when account exists")
-    void searchAccount_found_returns200WithBalance() throws Exception {
+    @DisplayName("POST /api/v1/accounts/lookup returns 200 with balance when account is found")
+    void lookupAccount_found_returns200WithBalance() throws Exception {
         // Arrange
-        AccountSearchRequest request = new AccountSearchRequest("Max", "Mustermann");
+        AccountLookupRequest request = new AccountLookupRequest();
+        request.setFullName("John Smith");
 
-        AccountSearchResponse response = AccountSearchResponse.found(
-                "Max",
-                "Mustermann",
-                new BigDecimal("1500.75")
-        );
-        Account sampleAccount = new Account("Max", "Mustermann", "1990-01-01", new BigDecimal("1500.75"));
+        AccountLookupResponse response = AccountLookupResponse.found(
+                "John", "Smith", new BigDecimal("1234.56"));
 
-        when(accountRepository.findByFirstNameAndLastName("Max", "Mustermann")).thenReturn(Optional.of(sampleAccount));
-        when(accountService.findAccount(any(AccountSearchRequest.class))).thenReturn(response);
+        when(accountService.lookupAccount(any(AccountLookupRequest.class)))
+                .thenReturn(response);
 
         // Act & Assert
-        mockMvc.perform(post("/api/v1/accounts/search")
+        mockMvc.perform(post("/api/v1/accounts/lookup")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(objectMapper.writeValueAsString(request)))
                 .andExpect(status().isOk())
                 .andExpect(content().contentType(MediaType.APPLICATION_JSON))
-                .andExpect(jsonPath("$.found").value(true))
-                .andExpect(jsonPath("$.firstName").value("Max"))
-                .andExpect(jsonPath("$.lastName").value("Mustermann"))
-                .andExpect(jsonPath("$.balance").value(1500.75));
-
-        verify(accountService).findAccount(any(AccountSearchRequest.class));
+                .andExpect(jsonPath("$.found").value(Optional.of(true)))
+                .andExpect(jsonPath("$.firstName").value("John"))
+                .andExpect(jsonPath("$.lastName").value("Smith"))
+                .andExpect(jsonPath("$.balance").value(Optional.of(1234.56)));
     }
 
-    // ---------------------------------------------------------------------------
-    // Not-found path: service throws AccountNotFoundException
-    // Mirrors the legacy COBOL branch: IF Name-Match = "N" -> display not-found
-    // ---------------------------------------------------------------------------
+    // ------------------------------------------------------------------
+    // Not-found path
+    // ------------------------------------------------------------------
 
     @Test
-    @DisplayName("POST /api/v1/accounts/search returns 404 when account does not exist")
-    void searchAccount_notFound_returns404() throws Exception {
+    @DisplayName("POST /api/v1/accounts/lookup returns 404 when no matching account exists")
+    void lookupAccount_notFound_returns404() throws Exception {
         // Arrange
-        AccountSearchRequest request = new AccountSearchRequest("Hans", "Meier");
+        AccountLookupRequest request = new AccountLookupRequest();
+        request.setFullName("Jane Doe");
 
-        when(accountService.findAccount(any(AccountSearchRequest.class)))
-                .thenThrow(new AccountNotFoundException("Hans", "Meier"));
+        when(accountService.lookupAccount(any(AccountLookupRequest.class)))
+                .thenThrow(new AccountNotFoundException("Jane Doe"));
 
         // Act & Assert
-        mockMvc.perform(post("/api/v1/accounts/search")
+        mockMvc.perform(post("/api/v1/accounts/lookup")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(objectMapper.writeValueAsString(request)))
                 .andExpect(status().isNotFound())
                 .andExpect(content().contentType(MediaType.APPLICATION_JSON))
-                .andExpect(jsonPath("$.message").exists());
+                .andExpect(jsonPath("$.error").exists());
     }
 
-    // ---------------------------------------------------------------------------
-    // Bean Validation: missing firstName
-    // ---------------------------------------------------------------------------
+    // ------------------------------------------------------------------
+    // Validation: missing fullName field
+    // ------------------------------------------------------------------
 
     @Test
-    @DisplayName("POST /api/v1/accounts/search returns 400 when firstName is blank")
-    void searchAccount_blankFirstName_returns400() throws Exception {
-        // Arrange – firstName left blank to trigger @NotBlank validation
-        AccountSearchRequest request = new AccountSearchRequest("", "Mustermann");
+    @DisplayName("POST /api/v1/accounts/lookup returns 400 when fullName is null")
+    void lookupAccount_nullFullName_returns400() throws Exception {
+        // Arrange – fullName intentionally omitted
+        String body = "{}";
 
         // Act & Assert
-        mockMvc.perform(post("/api/v1/accounts/search")
+        mockMvc.perform(post("/api/v1/accounts/lookup")
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content(objectMapper.writeValueAsString(request)))
-                .andExpect(status().isBadRequest());
+                        .content(body))
+                .andExpect(status().isBadRequest())
+                .andExpect(content().contentType(MediaType.APPLICATION_JSON))
+                .andExpect(jsonPath("$.errors").exists());
     }
 
-    // ---------------------------------------------------------------------------
-    // Bean Validation: missing lastName
-    // ---------------------------------------------------------------------------
+    // ------------------------------------------------------------------
+    // Validation: fullName is blank
+    // ------------------------------------------------------------------
 
     @Test
-    @DisplayName("POST /api/v1/accounts/search returns 400 when lastName is blank")
-    void searchAccount_blankLastName_returns400() throws Exception {
-        // Arrange – lastName left blank to trigger @NotBlank validation
-        AccountSearchRequest request = new AccountSearchRequest("Max", "");
+    @DisplayName("POST /api/v1/accounts/lookup returns 400 when fullName is blank")
+    void lookupAccount_blankFullName_returns400() throws Exception {
+        // Arrange
+        AccountLookupRequest request = new AccountLookupRequest();
+        request.setFullName("   ");
 
         // Act & Assert
-        mockMvc.perform(post("/api/v1/accounts/search")
+        mockMvc.perform(post("/api/v1/accounts/lookup")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(objectMapper.writeValueAsString(request)))
-                .andExpect(status().isBadRequest());
+                .andExpect(status().isBadRequest())
+                .andExpect(content().contentType(MediaType.APPLICATION_PROBLEM_JSON));
     }
 
-    // ---------------------------------------------------------------------------
-    // Bean Validation: both fields missing
-    // ---------------------------------------------------------------------------
+    // ------------------------------------------------------------------
+    // Validation: fullName contains no space (no last-name separator)
+    // Legacy COBOL silently left WS-Input-LastName empty in this case;
+    // the modernised system rejects the input at the API boundary.
+    // ------------------------------------------------------------------
 
     @Test
-    @DisplayName("POST /api/v1/accounts/search returns 400 when both name fields are null")
-    void searchAccount_nullFields_returns400() throws Exception {
-        // Arrange – both fields null to trigger @NotBlank on both
-        AccountSearchRequest request = new AccountSearchRequest(null, null);
+    @DisplayName("POST /api/v1/accounts/lookup returns 400 when fullName has no space delimiter")
+    void lookupAccount_noSpaceInFullName_returns400() throws Exception {
+        // Arrange – single token, no space between first and last name
+        AccountLookupRequest request = new AccountLookupRequest();
+        request.setFullName("JohnSmith");
 
         // Act & Assert
-        mockMvc.perform(post("/api/v1/accounts/search")
+        mockMvc.perform(post("/api/v1/accounts/lookup")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(objectMapper.writeValueAsString(request)))
-                .andExpect(status().isBadRequest());
+                .andExpect(status().isBadRequest())
+                .andExpect(content().contentType(MediaType.APPLICATION_PROBLEM_JSON));
     }
 
-    // ---------------------------------------------------------------------------
-    // Content-type guard: non-JSON body
-    // ---------------------------------------------------------------------------
+    // ------------------------------------------------------------------
+    // Validation: wrong HTTP content-type
+    // ------------------------------------------------------------------
 
     @Test
-    @DisplayName("POST /api/v1/accounts/search returns 415 when Content-Type is not JSON")
-    void searchAccount_wrongContentType_returns415() throws Exception {
-        mockMvc.perform(post("/api/v1/accounts/search")
+    @DisplayName("POST /api/v1/accounts/lookup returns 415 for non-JSON content type")
+    void lookupAccount_wrongContentType_returns415() throws Exception {
+        mockMvc.perform(post("/api/v1/accounts/lookup")
                         .contentType(MediaType.TEXT_PLAIN)
-                        .content("Max Mustermann"))
+                        .content("John Smith"))
                 .andExpect(status().isUnsupportedMediaType());
     }
 
-    // ---------------------------------------------------------------------------
-    // Malformed JSON body
-    // ---------------------------------------------------------------------------
+    // ------------------------------------------------------------------
+    // Validation: fullName contains only spaces
+    // ------------------------------------------------------------------
 
     @Test
-    @DisplayName("POST /api/v1/accounts/search returns 400 when request body is malformed JSON")
-    void searchAccount_malformedJson_returns400() throws Exception {
-        mockMvc.perform(post("/api/v1/accounts/search")
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content("{bad json}"))
-                .andExpect(status().isBadRequest());
-    }
+    @DisplayName("POST /api/v1/accounts/lookup returns 400 when fullName contains only spaces")
+    void lookupAccount_onlySpaces_returns400() throws Exception {
+        AccountLookupRequest request = new AccountLookupRequest();
+        request.setFullName("     ");
 
-    // ---------------------------------------------------------------------------
-    // Whitespace-only names (equivalent to the legacy UNSTRING producing empty tokens)
-    // ---------------------------------------------------------------------------
-
-    @Test
-    @DisplayName("POST /api/v1/accounts/search returns 400 when firstName is whitespace only")
-    void searchAccount_whitespaceFirstName_returns400() throws Exception {
-        AccountSearchRequest request = new AccountSearchRequest("   ", "Mustermann");
-
-        mockMvc.perform(post("/api/v1/accounts/search")
+        mockMvc.perform(post("/api/v1/accounts/lookup")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(objectMapper.writeValueAsString(request)))
-                .andExpect(status().isBadRequest());
+                .andExpect(status().isBadRequest())
+                .andExpect(content().contentType(MediaType.APPLICATION_PROBLEM_JSON));
+    }
+
+    // ------------------------------------------------------------------
+    // Validation: fullName exceeds maximum length (60 chars from COBOL PIC X(60))
+    // ------------------------------------------------------------------
+
+    @Test
+    @DisplayName("POST /api/v1/accounts/lookup returns 400 when fullName exceeds 60 characters")
+    void lookupAccount_fullNameTooLong_returns400() throws Exception {
+        // 61-character string with a space to satisfy the space-presence check
+        String longName = "A".repeat(30) + " " + "B".repeat(30); // 61 chars total
+        AccountLookupRequest request = new AccountLookupRequest();
+        request.setFullName(longName);
+
+        mockMvc.perform(post("/api/v1/accounts/lookup")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(request)))
+                .andExpect(status().isBadRequest())
+                .andExpect(content().contentType(MediaType.APPLICATION_PROBLEM_JSON));
     }
 }

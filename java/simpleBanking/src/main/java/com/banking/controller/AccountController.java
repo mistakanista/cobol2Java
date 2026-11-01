@@ -1,23 +1,26 @@
 package com.banking.controller;
 
-import com.banking.dto.AccountSearchRequest;
-import com.banking.dto.AccountSearchResponse;
+import com.banking.dto.AccountLookupRequest;
+import com.banking.dto.AccountLookupResponse;
 import com.banking.service.AccountService;
 import jakarta.validation.Valid;
 import org.springframework.http.ResponseEntity;
-import org.springframework.web.bind.annotation.*;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
 
 /**
- * REST controller exposing account search functionality.
+ * REST controller replacing the legacy COBOL MAIN-PROCEDURE console interaction.
  *
- * Legacy mapping: The original COBOL MAIN-PROCEDURE accepted operator console input
- * (ACCEPT WS-UserInput) and performed a sequential file search. This is translated into
- * a POST endpoint accepting a structured JSON request body, replacing the console I/O
- * and file-read loop with a service-layer database query.
+ * The original COBOL program used DISPLAY/ACCEPT statements for console I/O and
+ * a sequential file scan loop to find an account. This controller exposes that
+ * same use case as a single POST endpoint, decoupling the I/O boundary from the
+ * business logic now encapsulated in AccountService.
  *
- * Resource path /api/v1/accounts/search uses POST because the operation transmits
- * search criteria in the request body (firstName + lastName), which is not idiomatic
- * for GET with a body. This avoids embedding PII in query parameters or URL paths.
+ * Resource-oriented path: /api/v1/accounts/lookup
+ * HTTP POST is used because the client submits a name to be resolved; GET is
+ * inappropriate here since the request carries a body with user-supplied input.
  */
 @RestController
 @RequestMapping("/api/v1/accounts")
@@ -25,33 +28,32 @@ public class AccountController {
 
     private final AccountService accountService;
 
-    // Constructor injection only – no field or setter injection (Clean Code / testability)
-    public AccountController(AccountService accountService) {
+    // Constructor injection - the only injection style used in this project
+    public AccountController(final AccountService accountService) {
         this.accountService = accountService;
     }
 
     /**
-     * Search for an account by first name and last name.
+     * Look up an account by the customer's full name.
      *
-     * Translates the legacy behaviour:
-     *   1. DISPLAY prompt + ACCEPT WS-UserInput  →  @RequestBody with @Valid
-     *   2. PERFORM PARSE-USER-INPUT (UNSTRING on SPACE)  →  structured DTO fields
-     *   3. Sequential file search loop  →  AccountService.findAccount()
-     *   4. DISPLAY balance or "Kein Konto gefunden"  →  AccountSearchResponse body
+     * Legacy mapping:
+     *   DISPLAY prompt          -> client sends POST request
+     *   ACCEPT WS-UserInput     -> @RequestBody AccountLookupRequest
+     *   PARSE-USER-INPUT        -> delegated to AccountService
+     *   file scan + IF match    -> delegated to AccountService
+     *   DISPLAY balance / error -> AccountLookupResponse returned to caller
      *
-     * HTTP 200  – account found, response contains customer name and balance
-     * HTTP 404  – no matching account (AccountNotFoundException → GlobalExceptionHandler)
-     * HTTP 400  – invalid/missing request fields (Bean Validation)
+     * Returns 200 OK with the matched balance, or 404 Not Found when no
+     * matching account exists (see GlobalExceptionHandler for 404 mapping).
      *
-     * @param request validated search criteria
-     * @return matched account details
+     * @param request validated request DTO containing the full name string
+     * @return ResponseEntity wrapping the lookup result
      */
-    @PostMapping("/search")
-    public ResponseEntity<AccountSearchResponse> searchAccount(
-            @Valid @RequestBody AccountSearchRequest request) {
+    @PostMapping("/lookup")
+    public ResponseEntity<AccountLookupResponse> lookupAccount(
+            @RequestBody @Valid final AccountLookupRequest request) {
 
-        AccountSearchResponse response = accountService.findAccount(request);
-
+        final AccountLookupResponse response = accountService.lookupAccount(request);
         return ResponseEntity.ok(response);
     }
 }

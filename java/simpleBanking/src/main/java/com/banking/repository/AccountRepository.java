@@ -7,33 +7,31 @@ import org.springframework.stereotype.Repository;
 import java.util.Optional;
 
 /**
- * Spring Data JPA repository for Account entities.
+ * Spring Data JPA repository for the Account entity.
  *
- * Legacy mapping note: The original COBOL program performed a sequential scan
- * of a flat file (accounts.txt), reading every record until a first/last name
- * match was found (PERFORM UNTIL … AT END). That linear search is replaced here
- * by a targeted JPQL-backed query. The exact-match semantics (WS-Input-FirstName
- * = WS-FirstName AND WS-Input-LastName = WS-LastName) are preserved through the
- * derived query method name, which generates a WHERE firstName = ? AND lastName = ?
- * clause — functionally identical to the COBOL EVALUATE condition.
+ * Design note: The legacy COBOL program performed a full sequential file scan
+ * comparing WS-Input-FirstName and WS-Input-LastName against each record using
+ * strict AND equality (no case folding, no normalisation). That exact,
+ * case-sensitive AND match is preserved here via a derived query method whose
+ * generated SQL uses equality predicates on both columns – semantically
+ * identical to the COBOL IF WS-Input-FirstName = WS-FirstName AND
+ * WS-Input-LastName = WS-LastName condition.
  *
- * Returning Optional<Account> replaces the Name-Match flag ('Y'/'N') and the
- * HIGH-VALUES sentinel used to short-circuit the legacy loop: an empty Optional
- * signals "no match" without requiring a mutable flag or a file-position trick.
+ * Returning Optional<Account> makes the not-found path explicit and removes
+ * the need for the legacy Name-Match flag that tracked whether any record was
+ * located during the file scan loop.
  */
 @Repository
 public interface AccountRepository extends JpaRepository<Account, Long> {
 
     /**
-     * Looks up an account by exact first and last name.
+     * Finds the first account whose firstName and lastName match the supplied
+     * values using exact, case-sensitive equality – mirroring the COBOL
+     * comparison logic exactly as mandated by the Data Quality Requirement.
      *
-     * Replaces the sequential file read loop in MAIN-PROCEDURE combined with
-     * the PARSE-ACCOUNT-LINE unstring logic. The database engine performs the
-     * comparison that the COBOL program did record-by-record in working storage.
-     *
-     * @param firstName the customer's first name (maps to WS-Input-FirstName)
-     * @param lastName  the customer's last name  (maps to WS-Input-LastName)
+     * @param firstName the first name token parsed from the user-supplied input
+     * @param lastName  the last name token parsed from the user-supplied input
      * @return an Optional containing the matched Account, or empty if none found
      */
-    Optional<Account> findByFirstNameAndLastName(String firstName, String lastName);
+    Optional<Account> findFirstByFirstNameAndLastName(String firstName, String lastName);
 }

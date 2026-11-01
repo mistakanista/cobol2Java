@@ -4,13 +4,14 @@ import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 
 /**
- * Entry point for the Banking Application.
+ * Entry point for the Banking Account Lookup application.
  *
- * Legacy context: The original COBOL program (BankingApp) was a batch/online
- * COBOL program invoked via STOP RUN. This Spring Boot application replaces
- * that execution model with a long-running service exposing REST endpoints,
- * removing the need for operator console interaction and file-based sequential
- * reads in favour of a JPA-backed REST API.
+ * Legacy context: The original COBOL program (BankingApp) executed as a
+ * single MAIN-PROCEDURE performing sequential file reads and console I/O.
+ * This Spring Boot application replaces that monolithic procedural flow with
+ * a layered, service-oriented REST backend. Console I/O is replaced by a
+ * REST API; sequential file reading at startup is handled by AccountFileLoader;
+ * and all business logic is encapsulated in AccountService.
  */
 @SpringBootApplication
 public class BankingApplication {
